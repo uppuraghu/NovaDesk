@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+dist/
+.env
+backend/.env
+backend/support_desk.db
+backend/uploads/*
+!backend/uploads/.gitkeep

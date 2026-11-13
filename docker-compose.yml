@@ -1,0 +1,26 @@
+services:
+  api:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////app/support_desk.db
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_CHAT_MODEL: llama3.2
+      OLLAMA_EMBED_MODEL: nomic-embed-text
+    volumes:
+      - ./backend/support_desk.db:/app/support_desk.db
+      - ./backend/uploads:/app/uploads
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  web:
+    image: node:20-alpine
+    working_dir: /ui
+    volumes:
+      - ./frontend:/ui
+      - /ui/node_modules
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
