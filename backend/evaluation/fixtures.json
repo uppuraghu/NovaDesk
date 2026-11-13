@@ -1,0 +1,14 @@
+[
+  {
+    "filename": "shipping-policy.txt",
+    "content": "Orders usually leave the warehouse within two business days. Once an order has shipped, customers receive a tracking link by email. The tracking link opens the carrier's tracking page."
+  },
+  {
+    "filename": "refund-policy.txt",
+    "content": "Customers may request a refund within 30 days of delivery. Returned items must be unused and in their original packaging. Refunds are processed to the original payment method."
+  },
+  {
+    "filename": "support-hours.txt",
+    "content": "Live support is available Monday through Friday from 9:00 AM to 5:00 PM Pacific Time, excluding public holidays."
+  }
+]

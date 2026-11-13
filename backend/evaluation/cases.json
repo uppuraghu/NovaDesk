@@ -1,0 +1,23 @@
+[
+  {
+    "id": "shipping-tracking",
+    "question": "How can I track an order that has shipped?",
+    "expected_sources": ["shipping-policy.txt"],
+    "expected_answer_terms": ["tracking link", "carrier"],
+    "grounding_terms": ["tracking link", "carrier"]
+  },
+  {
+    "id": "refund-window",
+    "question": "How long do I have to request a refund?",
+    "expected_sources": ["refund-policy.txt"],
+    "expected_answer_terms": ["30 days", "unused"],
+    "grounding_terms": ["30 days", "unused"]
+  },
+  {
+    "id": "support-hours",
+    "question": "When is live support available?",
+    "expected_sources": ["support-hours.txt"],
+    "expected_answer_terms": ["Monday", "Friday", "9:00"],
+    "grounding_terms": ["Monday", "Friday", "9:00"]
+  }
+]

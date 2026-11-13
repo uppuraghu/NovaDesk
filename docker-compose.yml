@@ -1,26 +1,75 @@
 services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: novadesk
+      POSTGRES_USER: novadesk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the project .env file}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U novadesk -d novadesk"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports:
+      - "8025:8025"
+    restart: unless-stopped
+
   api:
     build: ./backend
-    ports:
-      - "8000:8000"
     environment:
-      DATABASE_URL: sqlite:////app/support_desk.db
+      APP_ENV: production
+      DATABASE_URL: postgresql+psycopg://novadesk:${POSTGRES_PASSWORD}@db:5432/novadesk
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in the project .env file}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
       OLLAMA_BASE_URL: http://host.docker.internal:11434
       OLLAMA_CHAT_MODEL: llama3.2
       OLLAMA_EMBED_MODEL: nomic-embed-text
+      EMBEDDING_DIMENSION: 768
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-novadesk@localhost}
+      FRONTEND_PUBLIC_URL: ${FRONTEND_PUBLIC_URL:-http://localhost:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
     volumes:
-      - ./backend/support_desk.db:/app/support_desk.db
-      - ./backend/uploads:/app/uploads
+      - uploads:/app/uploads
+    ports:
+      - "8000:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-  web:
-    image: node:20-alpine
-    working_dir: /ui
-    volumes:
-      - ./frontend:/ui
-      - /ui/node_modules
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-    ports:
-      - "5173:5173"
     depends_on:
-      - api
+      db:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3)); assert data.get('database') == 'connected'"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  uploads:

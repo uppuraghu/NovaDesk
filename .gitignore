@@ -8,3 +8,6 @@ backend/.env
 backend/support_desk.db
 backend/uploads/*
 !backend/uploads/.gitkeep
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,198 +1,174 @@
-# NovaDesk — Full-Stack AI Customer Support Desk (Day 6)
+# NovaDesk — AI Customer Support Desk
 
-A runnable hackathon-style project built with React + Vite, FastAPI, SQLite, Ollama, PDF ingestion, retrieval-augmented generation (RAG), and WebSockets.
+NovaDesk combines a React support dashboard, FastAPI APIs, PostgreSQL with pgvector, and local Ollama models. It includes tenant-isolated accounts, collaborative tickets, a PDF knowledge base, and measurable AI answer evaluations.
 
 ## Features
 
-- React dashboard with overview, assistant, tickets, and knowledge-base pages.
-- FastAPI REST API with interactive Swagger docs at `/docs`.
-- Local LLM responses through Ollama (`llama3.2`).
-- PDF knowledge ingestion with page-aware chunking.
-- RAG: `nomic-embed-text` embeddings stored in SQLite and cosine-similarity retrieval.
-- Source references returned with AI answers.
-- Ticket create/update workflow with persistent SQLite storage.
-- WebSocket broadcasts for ticket creation and updates.
-- Responsive UI and Docker Compose setup.
+- Email/password authentication with Argon2 password hashes and short-lived JWT access tokens.
+- Tenant-scoped workspaces, administrator/agent roles, and expiring email invitations.
+- PostgreSQL persistence with pgvector cosine-distance retrieval; SQLite remains available for local development and tests.
+- Tenant-filtered conversations, documents, tickets, comments, and audit history.
+- Ticket assignment, customer/internal comments, audit events, and SMTP notifications.
+- Structured AI ticket suggestions for category, priority, and sentiment. Suggestions remain pending until a signed-in human approves them.
+- An evaluation runner measuring answer-term correctness, evidence-term groundedness, retrieval recall, latency, and estimated inference cost.
+- JSON request logs, health checks, backend/API tests, and GitHub Actions CI.
 
-> This is a learning/hackathon starter, not a production-ready customer support system. It has no user authentication, authorization, rate limiting, or tenant isolation. Do not upload confidential customer data.
+## Run with Docker Compose
 
-## Architecture
+Docker Compose starts PostgreSQL/pgvector, the API, a production-built React frontend, and Mailpit for local email testing.
 
-```text
-React UI (5173)
-   | REST + WebSocket
-FastAPI (8000)
-   |-- SQLite: tickets, conversations, messages, document chunks
-   |-- PDF extraction -> chunking -> Ollama embeddings -> vector similarity retrieval
-   |-- Ollama chat model -> grounded response + source references
-Ollama (11434)
-   |-- llama3.2
-   |-- nomic-embed-text
-```
+1. Copy `.env.example` to `.env`.
+2. Replace `POSTGRES_PASSWORD` and `JWT_SECRET_KEY` with random values. For example, generate a random hexadecimal string with:
 
-## Requirements
+   ```powershell
+   python -c "import secrets; print(secrets.token_hex(32))"
+   ```
 
-- Python 3.10+
-- Node.js 18+
-- Ollama installed and running
-- At least one Ollama chat model and one embedding model
+3. If migrating an existing local database, set `BOOTSTRAP_ADMIN_EMAIL` to the intended owner before starting the API. This prevents another first-time registrant from claiming the legacy workspace.
+4. Start Ollama on the host and pull the configured models:
 
-## 1. Start Ollama
+   ```powershell
+   ollama pull llama3.2
+   ollama pull nomic-embed-text
+   ```
 
-Open a terminal:
+5. From the project root:
 
-```bash
-ollama pull llama3.2
-ollama pull nomic-embed-text
-ollama serve
-```
+   ```powershell
+   docker compose up --build
+   ```
 
-If Ollama is already running as a Windows background service, you do not need to run `ollama serve` again. Verify:
+Open the app at http://localhost:5173. Create the first account to initialize the workspace; use an invitation link to add additional team members. Mailpit captures local messages at http://localhost:8025.
 
-```bash
-ollama list
-```
+The Compose setup uses Mailpit for development. For deployment, configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, and `SMTP_USE_TLS` for your mail service, use strong generated database/JWT secrets, and set the correct `FRONTEND_PUBLIC_URL` and `CORS_ORIGINS`. The frontend image is built as static assets and served by Nginx; `/api` and `/ws` are reverse-proxied to FastAPI.
 
-## 2. Start the backend (Windows PowerShell)
+## Run locally with SQLite
 
-Open terminal 1:
+Python 3.11+, Node.js 20+, and Ollama are recommended.
 
 ```powershell
-cd day6-ai-support-desk/backend
+cd backend
 py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-Copy-Item .env.example .env
+```
+
+If `backend\.env` does not already exist, copy `backend\.env.example` to `backend\.env`. Keep any existing `.env` file; it may contain local credentials. Set `DATABASE_URL=sqlite:///./support_desk.db` and a development-only `JWT_SECRET_KEY`. If the existing SQLite database contains tickets or documents, set `BOOTSTRAP_ADMIN_EMAIL` to the intended owner.
+
+From `backend`:
+
+```powershell
+alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-Backend:
-- API: http://localhost:8000
-- Swagger docs: http://localhost:8000/docs
-- Health: http://localhost:8000/api/health
-
-If PowerShell blocks activation, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`, then activate again. Or use `py -m pip install -r requirements.txt` without activating the environment.
-
-## 3. Start the React UI
-
-Open terminal 2:
+In another terminal:
 
 ```powershell
-cd day6-ai-support-desk/frontend
-npm install
+cd frontend
+npm ci
 npm run dev
 ```
 
-Open http://localhost:5173.
+The API is at http://localhost:8000, Swagger docs at http://localhost:8000/docs, and the UI at http://localhost:5173. Configure an SMTP server to send invitations and ticket notifications; without SMTP, ticket notifications are logged as skipped and invitation creation returns a configuration error.
 
-## 4. Try the full workflow
+## Authentication and tenant setup
 
-1. Open **Knowledge base** and upload a PDF with selectable text.
-2. Wait for the indexing success message.
-3. Open **AI Assistant** and ask a question answered by the PDF.
-4. Inspect the source filename, page and similarity score below the answer.
-5. Open **Tickets**, create a ticket and change its status.
-6. Open another browser tab to the dashboard: ticket changes are broadcast over WebSocket and the UI refreshes live.
+- The first registration creates the initial administrator and workspace. Later registrations create separate workspaces.
+- Set `BOOTSTRAP_ADMIN_EMAIL` when migrating a local database with existing records. Only that address can claim the initial legacy workspace.
+- Every resource query is scoped to the authenticated tenant; conversation history is additionally scoped to its owner. WebSocket connections use short-lived, tenant-scoped tokens.
+- Access tokens expire after 30 minutes by default. Change `JWT_ACCESS_TOKEN_MINUTES` if required.
+- To sign out, select the sign-out icon at the bottom of the left sidebar, beside your name and role.
 
-For a useful demo, create a short PDF containing your own fictional company policies, such as refund rules, support hours, delivery timelines, and password-reset steps.
+## Team management
 
-## API endpoints
+Open **Team** from the left sidebar to view active workspace members. Workspace administrators can invite teammates by email and choose the **Support agent** or **Administrator** role. The invitee follows the single-use email link to set their name and password; invitations expire after 24 hours. Configure SMTP to deliver invitations (local Docker Compose captures them in Mailpit at http://localhost:8025).
+
+## Ticket workflow
+
+Tickets can be assigned to active workspace members. Comments can be marked internal; internal notes are not emailed to the customer. Ticket creation, updates, assignment, comments, and AI suggestion decisions are recorded in an audit history.
+
+Use **AI classify** on a ticket to generate category, priority, sentiment, and a short reason. The current ticket fields do not change until a human selects **Approve**. Rejecting a suggestion is also recorded.
+
+Notifications go to the assignee or workspace owner and, when provided, the customer's email. New comments notify the assignee and customer unless the comment is internal. SMTP failures are logged in structured form.
+
+## AI evaluations
+
+The sample evaluation cases use synthetic shipping, refund, and support-hours policies. With Docker Compose, get the `tenant_id` from `GET /api/auth/me`, then seed the fixture passages and run the benchmark:
+
+```powershell
+docker compose exec api python -m app.seed_evaluation_data --tenant-id 1
+docker compose exec api python -m app.evaluation --email you@example.com
+```
+
+Use the tenant ID returned by `/api/auth/me` instead of `1` for additional workspaces. The evaluation runner prompts for the account password and emits per-case and aggregate JSON:
+
+- **Correctness:** fraction of expected answer phrases present.
+- **Groundedness:** fraction of expected evidence phrases present when an expected source was retrieved.
+- **Retrieval recall:** fraction of expected source documents returned.
+- **Latency:** Ollama-reported duration, falling back to measured API time.
+- **Estimated cost:** configured per-million-token rates times Ollama usage counts. Local Ollama defaults to zero cost.
+
+The phrase-based correctness/groundedness scores are deterministic regression indicators, not a semantic model judge. Extend `backend/evaluation/cases.json` with domain-specific expected phrases and source files.
+
+## API overview
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/api/health` | API and Ollama health |
-| POST | `/api/chat` | Ask the AI assistant |
-| GET | `/api/conversations` | List recent conversations |
-| POST | `/api/documents/upload` | Upload and index a PDF |
-| GET | `/api/documents` | List indexed documents |
-| DELETE | `/api/documents/{filename}` | Remove indexed chunks |
-| GET | `/api/tickets` | List tickets |
-| POST | `/api/tickets` | Create ticket |
-| PATCH | `/api/tickets/{ticket_id}` | Update status/priority |
-| GET | `/api/stats` | Dashboard counts |
-| WS | `/ws` | Live ticket events |
+| POST | `/api/auth/register` | Create the first workspace or a new tenant |
+| POST | `/api/auth/login` | Authenticate and receive an access token |
+| GET | `/api/auth/me` | Current user and workspace |
+| POST | `/api/auth/ws-token` | Mint a short-lived WebSocket token |
+| GET/POST | `/api/team` and `/api/team/invitations` | List members and invite users |
+| POST | `/api/auth/accept-invitation` | Accept an invitation |
+| POST | `/api/chat` | Ask a grounded assistant question |
+| GET/POST | `/api/tickets` | List or create tickets |
+| PATCH | `/api/tickets/{id}` | Update status, priority, category, or assignee |
+| POST | `/api/tickets/{id}/classify` | Generate pending AI classification |
+| POST | `/api/tickets/{id}/classification/{approve\|reject}` | Human decision on classification |
+| GET/POST | `/api/tickets/{id}/comments` | Read or add comments |
+| GET | `/api/tickets/{id}/audit` | Read ticket audit history |
+| POST/GET/DELETE | `/api/documents` | Upload, list, or delete tenant documents |
+| GET | `/api/health` | API, database, and Ollama health |
+| WS | `/ws?token=...` | Tenant-isolated live ticket updates |
 
-## Example API request
+Protected endpoints require `Authorization: Bearer <access_token>`.
 
-```json
-{
-  "message": "What is the refund policy?",
-  "conversation_id": null
-}
+## Migrations, tests, and CI
+
+Run database migrations with `alembic upgrade head` from `backend`. The migration preserves legacy SQLite ticket, conversation, and document rows in the initial workspace. PostgreSQL enables the `vector` extension and stores embeddings as fixed-dimension vectors with an HNSW cosine index.
+
+Run backend tests and the frontend production build:
+
+```powershell
+cd backend
+python -m pytest -q
+cd ..\frontend
+npm ci
+npm run build
 ```
 
-Send to `POST http://localhost:8000/api/chat`.
+GitHub Actions runs the migration, backend tests, and frontend build on pushes and pull requests to `main`.
 
-## RAG implementation details
-
-- `pypdf` extracts text from each PDF page.
-- `split_text()` creates chunks of about 850 characters with 120 characters overlap.
-- Ollama `nomic-embed-text` converts each chunk into a vector.
-- Vectors are saved as JSON in SQLite for this small local demo.
-- Each query is embedded and compared with stored vectors using cosine similarity.
-- Top matching passages are passed to `llama3.2` as context.
-- The API returns source filename and page number.
-
-The similarity cutoff in this starter is a simple heuristic, not a calibrated confidence score. For larger datasets, move vectors to Chroma, FAISS, or pgvector and add metadata filters, reranking, and retrieval evaluation.
-
-## Docker option
-
-Keep Ollama running on the host, then from the project root:
-
-```bash
-docker compose up --build
-```
-
-Open http://localhost:5173. The API container reaches host Ollama through `host.docker.internal`. If this networking setup is unavailable, run backend and frontend directly using the steps above.
-
-## Troubleshooting
-
-- **Ollama not detected:** run `ollama list`; start Ollama; check `http://localhost:11434/api/tags`.
-- **Model not found:** run `ollama pull llama3.2` and `ollama pull nomic-embed-text`.
-- **Chat returns 503:** verify Ollama is reachable and both models are installed.
-- **PDF upload fails:** check that it is a text-based PDF and smaller than 15 MB. Scanned PDFs need OCR.
-- **Frontend cannot connect:** confirm FastAPI is running on port 8000 and Vite on 5173.
-- **Port already in use:** stop the process using that port or change the port in the run command/configuration.
-- **No live updates:** check browser console and ensure the WebSocket URL `ws://localhost:8000/ws` is reachable.
-
-## Suggested hackathon improvements
-
-1. Add authentication and per-user/tenant access control.
-2. Use PostgreSQL + pgvector for production persistence and vector search.
-3. Add ticket assignment, comments, audit history, and email notifications.
-4. Add structured AI classification (category, priority, sentiment) and human approval before actions.
-5. Add evaluation cases for answer correctness, groundedness, retrieval recall, latency, and cost.
-6. Add tests, structured logs, Docker health checks, and CI.
-
-## How to explain this project in an interview
-
-"I built a full-stack AI support desk. The frontend is React and the backend is FastAPI. I integrated a local Ollama model so customer questions can be answered without sending data to an external LLM provider. For company-specific answers, I implemented a RAG pipeline: PDFs are extracted, split into overlapping chunks, embedded with an embedding model, stored in SQLite, and retrieved using cosine similarity. The retrieved passages are added to the LLM prompt, and the API returns source references. I also built ticket CRUD APIs, dashboard metrics, and WebSocket events so ticket updates appear live in the UI. I chose SQLite to make the demo easy to run locally, and I would move to PostgreSQL with pgvector, add authentication, and introduce retrieval evaluation before production."
-
-## Project structure
+## Project layout
 
 ```text
-day6-ai-support-desk/
-├── backend/
-│   ├── app/
-│   │   ├── ai.py
-│   │   ├── config.py
-│   │   ├── database.py
-│   │   ├── main.py
-│   │   ├── models.py
-│   │   ├── realtime.py
-│   │   └── schemas.py
-│   ├── uploads/
-│   ├── requirements.txt
-│   └── Dockerfile
-├── frontend/
-│   ├── src/
-│   │   ├── api.js
-│   │   ├── App.jsx
-│   │   ├── main.jsx
-│   │   └── styles.css
-│   ├── index.html
-│   ├── package.json
-│   └── vite.config.js
-├── docker-compose.yml
-└── README.md
+backend/
+  app/                 FastAPI endpoints, auth, models, evaluation, and services
+  evaluation/          Synthetic benchmark cases and policy fixtures
+  migrations/          Alembic database migration
+  tests/               API, migration, and evaluation tests
+frontend/
+  src/                 React UI
+  Dockerfile           Static production build
+  nginx.conf           SPA and API/WebSocket reverse proxy
+docker-compose.yml     PostgreSQL/pgvector, API, Mailpit, and web
 ```
+
+## Operational notes
+
+- Health checks verify PostgreSQL connectivity and frontend/API responsiveness. Ollama is reported separately so the API can start while the local model service is unavailable.
+- Uploaded PDFs are extracted in memory; files are not retained on the API container.
+- `EMBEDDING_DIMENSION` must match the configured embedding model. The default 768 dimension matches `nomic-embed-text`.
+- Avoid exposing Swagger, Mailpit, PostgreSQL, or an Ollama host port publicly without appropriate network controls.
+- This starter does not yet include password reset, rate limiting, identity federation, or a customer-facing ticket portal.

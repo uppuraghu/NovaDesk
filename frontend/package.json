@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "scripts": { "dev": "vite --host 0.0.0.0", "build": "vite", "preview": "vite preview" },
+  "scripts": { "dev": "vite --host 0.0.0.0", "build": "vite build", "preview": "vite preview" },
   "dependencies": {
     "axios": "^1.8.4",
     "lucide-react": "^0.468.0",

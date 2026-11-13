@@ -5,7 +5,7 @@ import {
   Activity, Bot, CheckCircle2, CircleHelp, FileText,
   LayoutDashboard, MessageSquare, Plus, Send, ShieldCheck,
   Ticket, UploadCloud, Wifi, WifiOff, X, Clock3,
-  AlertCircle, Trash2, RefreshCw, ShoppingBag
+  AlertCircle, Trash2, RefreshCw, ShoppingBag, Users, LogOut, UserPlus
 } from "lucide-react";
 import api from "./api";
 
@@ -15,14 +15,18 @@ const initialMessages = [{
 }];
 
 function App() {
+  const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
   const [tab, setTab] = useState("overview");
-  const [health, setHealth] = useState({ api: "checking", ollama: "checking" });
+  const [health, setHealth] = useState({ api: "checking", database: "checking", ollama: "checking" });
   const [stats, setStats] = useState({
     total: 0, open: 0, in_progress: 0,
     resolved: 0, urgent: 0, documents: 0
   });
   const [tickets, setTickets] = useState([]);
+  const [members, setMembers] = useState([]);
   const [docs, setDocs] = useState([]);
+  const [selectedTicket, setSelectedTicket] = useState(null);
   const [messages, setMessages] = useState(initialMessages);
   const [conversationId, setConversationId] = useState(null);
   const [question, setQuestion] = useState("");
@@ -32,61 +36,116 @@ function App() {
   const [live, setLive] = useState(false);
   const [ticketForm, setTicketForm] = useState({
     customer_name: "Website visitor",
+    customer_email: "",
     subject: "",
     description: "",
     priority: "medium",
     category: "general"
   });
   const [showTicketForm, setShowTicketForm] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState("agent");
   const [filter, setFilter] = useState("all");
   const bottomRef = useRef(null);
   const fileRef = useRef(null);
 
+  useEffect(() => {
+    let active = true;
+    const token = localStorage.getItem("novadesk_access_token");
+    if (!token) {
+      setAuthReady(true);
+    } else {
+      api.get("/auth/me")
+        .then(result => { if (active) setUser(result.data); })
+        .catch(error => {
+          if (error.response?.status === 401) api.setAuthToken(null);
+        })
+        .finally(() => { if (active) setAuthReady(true); });
+    }
+
+    const expire = () => setUser(null);
+    window.addEventListener("novadesk-auth-expired", expire);
+    return () => {
+      active = false;
+      window.removeEventListener("novadesk-auth-expired", expire);
+    };
+  }, []);
+
+  const handleAuthenticated = (result) => {
+    api.setAuthToken(result.access_token);
+    setUser(result.user);
+  };
+
+  const logout = () => {
+    api.setAuthToken(null);
+    setUser(null);
+    setTickets([]);
+    setDocs([]);
+    setMessages(initialMessages);
+    setConversationId(null);
+  };
+
   const refresh = useCallback(async () => {
     try {
-      const [h, s, t, d] = await Promise.all([
+      const [h, s, t, d, team] = await Promise.all([
         api.get("/health"),
         api.get("/stats"),
         api.get("/tickets"),
-        api.get("/documents")
+        api.get("/documents"),
+        api.get("/team")
       ]);
       setHealth(h.data);
       setStats(s.data);
       setTickets(t.data);
       setDocs(d.data);
+      setMembers(team.data);
     } catch {
-      setHealth({ api: "offline", ollama: "unknown" });
+      setHealth({ api: "offline", database: "unknown", ollama: "unknown" });
     }
   }, []);
 
   useEffect(() => {
+    if (!user) return undefined;
     refresh();
     const timer = setInterval(refresh, 10000);
     return () => clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, user]);
 
   useEffect(() => {
+    if (!user) return undefined;
     let socket;
     let retry;
+    let stopped = false;
 
-    const connect = () => {
-      socket = new WebSocket("ws://localhost:8000/ws");
-      socket.onopen = () => setLive(true);
-      socket.onmessage = () => refresh();
-      socket.onclose = () => {
+    const connect = async () => {
+      try {
+        const { data } = await api.post("/auth/ws-token");
+        if (stopped) return;
+        const apiUrl = new URL(api.defaults.baseURL, window.location.href);
+        const wsProtocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
+        const wsUrl = import.meta.env.VITE_WS_URL || `${wsProtocol}//${apiUrl.host}/ws`;
+        socket = new WebSocket(`${wsUrl}?token=${encodeURIComponent(data.token)}`);
+        socket.onopen = () => setLive(true);
+        socket.onmessage = () => refresh();
+        socket.onclose = () => {
+          setLive(false);
+          if (!stopped) retry = setTimeout(connect, 3000);
+        };
+        socket.onerror = () => socket.close();
+      } catch {
         setLive(false);
-        retry = setTimeout(connect, 3000);
-      };
-      socket.onerror = () => socket.close();
+        if (!stopped) retry = setTimeout(connect, 5000);
+      }
     };
 
     connect();
 
     return () => {
+      stopped = true;
       socket?.close();
       clearTimeout(retry);
     };
-  }, [refresh]);
+  }, [refresh, user]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -178,6 +237,7 @@ function App() {
 
       setTicketForm({
         customer_name: "Website visitor",
+        customer_email: "",
         subject: "",
         description: "",
         priority: "medium",
@@ -192,12 +252,43 @@ function App() {
     }
   };
 
-  const updateTicket = async (id, status) => {
+  const updateTicket = async (id, changes) => {
     try {
-      await api.patch(`/tickets/${id}`, { status });
+      await api.patch(`/tickets/${id}`, changes);
       await refresh();
     } catch {
       setNotice("Could not update ticket.");
+    }
+  };
+
+  const classifyTicket = async (id) => {
+    try {
+      await api.post(`/tickets/${id}/classify`);
+      await refresh();
+      setNotice("AI suggestions are ready for human review.");
+    } catch (err) {
+      setNotice(err.response?.data?.detail || "Could not classify this ticket.");
+    }
+  };
+
+  const decideClassification = async (id, decision) => {
+    try {
+      await api.post(`/tickets/${id}/classification/${decision}`);
+      await refresh();
+      setNotice(decision === "approve" ? "AI suggestions approved and applied." : "AI suggestions rejected.");
+    } catch (err) {
+      setNotice(err.response?.data?.detail || "Could not update the AI suggestion.");
+    }
+  };
+
+  const inviteMember = async (event) => {
+    event.preventDefault();
+    try {
+      await api.post("/team/invitations", { email: inviteEmail, role: inviteRole });
+      setInviteEmail("");
+      setNotice("Invitation sent by email. It expires in 24 hours.");
+    } catch (err) {
+      setNotice(err.response?.data?.detail || "Could not invite this team member.");
     }
   };
 
@@ -221,6 +312,13 @@ function App() {
     [tickets, filter]
   );
 
+  if (!authReady) {
+    return <div className="auth-loading">Loading your secure workspace…</div>;
+  }
+  if (!user) {
+    return <AuthPage onAuthenticated={handleAuthenticated} />;
+  }
+
   return (
     <div className="app-shell">
 
@@ -240,8 +338,8 @@ function App() {
         <div className="workspace">
           <span className="workspace-dot"></span>
           <div>
-            <b>Acme Workspace</b>
-            <small>Local development</small>
+            <b>{user.tenant_name || "Workspace"}</b>
+            <small>{user.role === "admin" ? "Administrator" : "Support agent"}</small>
           </div>
           <span className="chevron">⌄</span>
         </div>
@@ -290,6 +388,13 @@ function App() {
             <ShoppingBag size={18} />
             Products
           </button>
+          <button
+            className={tab === "team" ? "nav-item active" : "nav-item"}
+            onClick={() => setTab("team")}
+          >
+            <Users size={18} />
+            Team
+          </button>
         </nav>
 
         <div className="sidebar-bottom">
@@ -318,15 +423,21 @@ function App() {
                 {live ? "Connected" : "Disconnected"}
               </span>
             </div>
+            <div className="system-row">
+              <span>Database</span>
+              <span className={health.database === "connected" ? "status-good" : "status-bad"}>
+                {health.database || "Unknown"}
+              </span>
+            </div>
           </div>
 
           <div className="profile">
-            <div className="avatar">RG</div>
+            <div className="avatar">{user.display_name.slice(0, 2).toUpperCase()}</div>
             <div>
-              <b>Raghu</b>
-              <small>Administrator</small>
+              <b>{user.display_name}</b>
+              <small>{user.role === "admin" ? "Administrator" : "Support agent"}</small>
             </div>
-            <span className="more">•••</span>
+            <button className="profile-logout" onClick={logout} title="Sign out"><LogOut size={15} /></button>
           </div>
         </div>
       </aside>
@@ -342,7 +453,8 @@ function App() {
                 tab === "assistant" ? "AI Assistant" :
                 tab === "tickets" ? "Tickets" :
                 tab === "knowledge" ? "Knowledge base" :
-                tab === "products" ? "Products" : ""}
+                tab === "products" ? "Products" :
+                tab === "team" ? "Team" : ""}
             </b>
           </div>
 
@@ -360,7 +472,7 @@ function App() {
               <RefreshCw size={17} />
             </button>
 
-            <div className="avatar small">RG</div>
+            <div className="avatar small">{user.display_name.slice(0, 2).toUpperCase()}</div>
           </div>
         </header>
 
@@ -379,7 +491,7 @@ function App() {
             <div className="page-heading">
               <div>
                 <p className="eyebrow">YOUR SUPPORT COMMAND CENTER</p>
-                <h1>Good afternoon, Raghu <span className="wave">✦</span></h1>
+                <h1>Welcome, {user.display_name.split(" ")[0]} <span className="wave">✦</span></h1>
                 <p className="subheading">
                   Here’s what’s happening with your customer support today.
                 </p>
@@ -416,7 +528,14 @@ function App() {
                 </div>
 
                 {tickets.length ?
-                  <TicketTable tickets={tickets.slice(0, 5)} onUpdate={updateTicket} /> :
+                  <TicketTable
+                    tickets={tickets.slice(0, 5)}
+                    members={members}
+                    onUpdate={updateTicket}
+                    onClassify={classifyTicket}
+                    onDecision={decideClassification}
+                    onView={setSelectedTicket}
+                  /> :
                   <Empty icon={<Ticket />} title="No tickets yet" text="Create a ticket to see it appear here." />
                 }
               </div>
@@ -627,7 +746,14 @@ function App() {
             </div>
 
             <div className="panel">
-              <TicketTable tickets={visibleTickets} onUpdate={updateTicket} />
+              <TicketTable
+                tickets={visibleTickets}
+                members={members}
+                onUpdate={updateTicket}
+                onClassify={classifyTicket}
+                onDecision={decideClassification}
+                onView={setSelectedTicket}
+              />
             </div>
           </section>
         )}
@@ -727,6 +853,50 @@ function App() {
           </section>
         )}
 
+        {tab === "team" && (
+          <section className="page">
+            <div className="page-heading">
+              <div>
+                <p className="eyebrow">WORKSPACE ACCESS</p>
+                <h1>Team members</h1>
+                <p className="subheading">Invite agents and administrators to this tenant workspace.</p>
+              </div>
+            </div>
+            {user.role === "admin" && (
+              <form className="panel invite-form" onSubmit={inviteMember}>
+                <div>
+                  <h2>Invite a teammate</h2>
+                  <p className="muted">An email invitation link expires after 24 hours.</p>
+                </div>
+                <input
+                  type="email"
+                  required
+                  value={inviteEmail}
+                  onChange={event => setInviteEmail(event.target.value)}
+                  placeholder="teammate@example.com"
+                />
+                <select value={inviteRole} onChange={event => setInviteRole(event.target.value)}>
+                  <option value="agent">Support agent</option>
+                  <option value="admin">Administrator</option>
+                </select>
+                <button className="primary-button"><UserPlus size={16} /> Send invitation</button>
+              </form>
+            )}
+            <div className="panel team-list">
+              <div className="panel-heading">
+                <div><h2>Active members</h2><p>{members.length} people in this workspace</p></div>
+              </div>
+              {members.map(member => (
+                <div className="team-row" key={member.id}>
+                  <div className="avatar">{member.display_name.slice(0, 2).toUpperCase()}</div>
+                  <div><b>{member.display_name}</b><small>{member.email}</small></div>
+                  <span className="team-role">{member.role}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* CREATE TICKET MODAL */}
         {showTicketForm && (
           <div className="modal-backdrop" onClick={() => setShowTicketForm(false)}>
@@ -757,6 +927,19 @@ function App() {
                     ...ticketForm,
                     customer_name: e.target.value
                   })}
+                />
+              </label>
+
+              <label>
+                Customer email (for ticket notifications)
+                <input
+                  type="email"
+                  value={ticketForm.customer_email}
+                  onChange={e => setTicketForm({
+                    ...ticketForm,
+                    customer_email: e.target.value
+                  })}
+                  placeholder="customer@example.com"
                 />
               </label>
 
@@ -839,8 +1022,109 @@ function App() {
           </div>
         )}
 
+        {selectedTicket && (
+          <TicketActivity ticket={selectedTicket} onClose={() => setSelectedTicket(null)} />
+        )}
+
       </main>
     </div>
+  );
+}
+
+function AuthPage({ onAuthenticated }) {
+  const inviteToken = new URLSearchParams(window.location.hash.slice(1)).get("invite") ||
+    new URLSearchParams(window.location.search).get("invite");
+  const [registerMode, setRegisterMode] = useState(Boolean(inviteToken));
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [tenantName, setTenantName] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      let response;
+      if (inviteToken) {
+        response = await api.post("/auth/accept-invitation", {
+          token: inviteToken,
+          display_name: displayName,
+          password
+        });
+        window.history.replaceState({}, "", window.location.pathname);
+      } else if (registerMode) {
+        response = await api.post("/auth/register", {
+          email,
+          password,
+          display_name: displayName,
+          tenant_name: tenantName
+        });
+      } else {
+        response = await api.post("/auth/login", { email, password });
+      }
+      onAuthenticated(response.data);
+    } catch (requestError) {
+      setError(requestError.response?.data?.detail || "Authentication failed. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="auth-page">
+      <form className="auth-card" onSubmit={submit}>
+        <div className="brand-mark auth-mark"><Bot size={23} /></div>
+        <p className="eyebrow">NOVADESK SUPPORT PLATFORM</p>
+        <h1>{inviteToken ? "Accept your invitation" : registerMode ? "Create your workspace" : "Welcome back"}</h1>
+        <p className="subheading">
+          {inviteToken ? "Set your name and password to join the workspace." :
+            registerMode ? "Your account will be the workspace administrator." :
+              "Sign in to access your secure support workspace."}
+        </p>
+        {(registerMode || inviteToken) && (
+          <label>
+            Your name
+            <input required value={displayName} onChange={event => setDisplayName(event.target.value)} />
+          </label>
+        )}
+        {!inviteToken && registerMode && (
+          <label>
+            Workspace name
+            <input required minLength="2" value={tenantName} onChange={event => setTenantName(event.target.value)} />
+          </label>
+        )}
+        {!inviteToken && (
+          <label>
+            Email
+            <input type="email" required autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} />
+          </label>
+        )}
+        <label>
+          Password
+          <input
+            type="password"
+            required
+            minLength={registerMode || inviteToken ? 12 : 1}
+            autoComplete={registerMode || inviteToken ? "new-password" : "current-password"}
+            value={password}
+            onChange={event => setPassword(event.target.value)}
+          />
+          {(registerMode || inviteToken) && <small>Use at least 12 characters.</small>}
+        </label>
+        {error && <div className="auth-error" role="alert">{error}</div>}
+        <button className="primary-button auth-submit" disabled={busy}>
+          {busy ? "Please wait…" : inviteToken ? "Join workspace" : registerMode ? "Create account" : "Sign in"}
+        </button>
+        {!inviteToken && (
+          <button type="button" className="auth-switch" onClick={() => setRegisterMode(value => !value)}>
+            {registerMode ? "Already have an account? Sign in" : "New to NovaDesk? Create a workspace"}
+          </button>
+        )}
+      </form>
+    </main>
   );
 }
 
@@ -865,7 +1149,7 @@ function Empty({ icon, title, text }) {
   );
 }
 
-function TicketTable({ tickets, onUpdate }) {
+function TicketTable({ tickets, members, onUpdate, onClassify, onDecision, onView }) {
   if (!tickets.length) {
     return (
       <Empty
@@ -883,6 +1167,7 @@ function TicketTable({ tickets, onUpdate }) {
           <tr>
             <th>TICKET</th>
             <th>CUSTOMER</th>
+            <th>ASSIGNEE</th>
             <th>PRIORITY</th>
             <th>STATUS</th>
             <th>CREATED</th>
@@ -903,6 +1188,22 @@ function TicketTable({ tickets, onUpdate }) {
               <td>{t.customer_name}</td>
 
               <td>
+                <select
+                  className="status-select"
+                  aria-label={`Assign ticket ${t.id}`}
+                  value={t.assigned_to_id || ""}
+                  onChange={event => onUpdate(t.id, {
+                    assigned_to_id: event.target.value ? Number(event.target.value) : null
+                  })}
+                >
+                  <option value="">Unassigned</option>
+                  {members.map(member => (
+                    <option key={member.id} value={member.id}>{member.display_name}</option>
+                  ))}
+                </select>
+              </td>
+
+              <td>
                 <span className={`priority ${t.priority}`}>
                   {t.priority}
                 </span>
@@ -920,17 +1221,110 @@ function TicketTable({ tickets, onUpdate }) {
                 <select
                   className="status-select"
                   value={t.status}
-                  onChange={e => onUpdate(t.id, e.target.value)}
+                  onChange={e => onUpdate(t.id, { status: e.target.value })}
                 >
                   <option value="open">Open</option>
                   <option value="in_progress">In progress</option>
                   <option value="resolved">Resolved</option>
                 </select>
+                <div className="ticket-tools">
+                  <button type="button" onClick={() => onClassify(t.id)}>AI classify</button>
+                  <button type="button" onClick={() => onView(t)}>Comments / history</button>
+                  {t.suggestion_status === "pending_approval" && (
+                    <div className="approval-tools">
+                      <span>
+                        {t.suggested_category} · {t.suggested_priority} · {t.suggested_sentiment}
+                      </span>
+                      <button type="button" onClick={() => onDecision(t.id, "approve")}>Approve</button>
+                      <button type="button" onClick={() => onDecision(t.id, "reject")}>Reject</button>
+                    </div>
+                  )}
+                  {t.suggestion_status === "approved" && <small>AI suggestions approved</small>}
+                  {t.suggestion_status === "rejected" && <small>AI suggestions rejected</small>}
+                </div>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function TicketActivity({ ticket, onClose }) {
+  const [comments, setComments] = useState([]);
+  const [audit, setAudit] = useState([]);
+  const [body, setBody] = useState("");
+  const [isInternal, setIsInternal] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const [commentResult, auditResult] = await Promise.all([
+        api.get(`/tickets/${ticket.id}/comments`),
+        api.get(`/tickets/${ticket.id}/audit`)
+      ]);
+      setComments(commentResult.data);
+      setAudit(auditResult.data);
+    } catch (requestError) {
+      setError(requestError.response?.data?.detail || "Could not load ticket activity.");
+    }
+  }, [ticket.id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const addComment = async (event) => {
+    event.preventDefault();
+    try {
+      await api.post(`/tickets/${ticket.id}/comments`, { body, is_internal: isInternal });
+      setBody("");
+      setError("");
+      await load();
+    } catch (requestError) {
+      setError(requestError.response?.data?.detail || "Could not add comment.");
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <section className="activity-modal" onClick={event => event.stopPropagation()}>
+        <div className="modal-head">
+          <div><h2>Ticket #{ticket.id}: {ticket.subject}</h2><p>Comments and audit history</p></div>
+          <button className="icon-button" onClick={onClose} aria-label="Close"><X /></button>
+        </div>
+        {error && <div className="auth-error" role="alert">{error}</div>}
+        <form className="comment-form" onSubmit={addComment}>
+          <textarea required value={body} onChange={event => setBody(event.target.value)} placeholder="Write a comment…" rows="3" />
+          <label className="internal-toggle">
+            <input type="checkbox" checked={isInternal} onChange={event => setIsInternal(event.target.checked)} />
+            Internal note (not emailed to customer)
+          </label>
+          <button className="primary-button"><Send size={15} /> Add comment</button>
+        </form>
+        <div className="activity-columns">
+          <div>
+            <h3>Comments</h3>
+            {comments.map(comment => (
+              <article className="activity-entry" key={comment.id}>
+                <b>{comment.author_name} {comment.is_internal && <span className="team-role">Internal</span>}</b>
+                <small>{new Date(comment.created_at).toLocaleString()}</small>
+                <p>{comment.body}</p>
+              </article>
+            ))}
+            {!comments.length && <p className="muted">No comments yet.</p>}
+          </div>
+          <div>
+            <h3>Audit history</h3>
+            {audit.map(entry => (
+              <article className="activity-entry" key={entry.id}>
+                <b>{entry.actor_name}</b><small>{new Date(entry.created_at).toLocaleString()}</small>
+                <p>{entry.action.replaceAll(".", " ")} · {JSON.stringify(entry.details)}</p>
+              </article>
+            ))}
+            {!audit.length && <p className="muted">No activity recorded yet.</p>}
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
